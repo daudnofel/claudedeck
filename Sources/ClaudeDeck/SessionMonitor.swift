@@ -35,12 +35,6 @@ final class SessionMonitor: ObservableObject {
         timer?.invalidate()
     }
 
-    /// The Terminal windows that host the current sessions (for Tuck all).
-    func sessionWindows() -> [TermWindow] {
-        let ids = Set(sessions.compactMap { $0.terminalWindowID })
-        return latestWindows.filter { ids.contains($0.id) }
-    }
-
     /// Kick off one poll cycle. Heavy work runs off the main thread; the Terminal
     /// snapshot and all publishing happen back on the main thread.
     func refresh() {

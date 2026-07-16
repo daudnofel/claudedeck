@@ -79,7 +79,7 @@ struct SessionListView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Button("Tuck all") {
-                    terminal.tuckAll(windows: monitor.sessionWindows())
+                    terminal.tuckAll(windows: monitor.latestWindows)
                 }
                 Button("Restore all") {
                     terminal.restoreAll()
