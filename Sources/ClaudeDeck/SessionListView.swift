@@ -45,7 +45,8 @@ struct SessionListView: View {
                 ForEach(monitor.sessions) { session in
                     SessionRow(session: session) {
                         if let wid = session.terminalWindowID {
-                            terminal.focusSession(windowID: wid, tty: session.tty)
+                            let current = monitor.latestWindows.first { $0.id == wid }?.bounds
+                            terminal.focusSession(windowID: wid, tty: session.tty, currentBounds: current)
                         }
                     }
                 }
@@ -82,7 +83,7 @@ struct SessionListView: View {
                     terminal.tuckAll(windows: monitor.latestWindows)
                 }
                 Button("Restore all") {
-                    terminal.restoreAll()
+                    terminal.restoreAll(windows: monitor.latestWindows)
                 }
             }
             Toggle("Show Dock window", isOn: dockBinding)

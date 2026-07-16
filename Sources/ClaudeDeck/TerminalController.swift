@@ -9,7 +9,34 @@ final class TerminalController: ObservableObject {
     @Published var permissionDenied: Bool = false
 
     /// Original bounds of tucked windows, keyed by Terminal window id.
-    private var savedBounds: [Int: Bounds] = [:]
+    /// Persisted to UserDefaults so an app restart never forgets where
+    /// tucked windows came from.
+    private var savedBounds: [Int: Bounds] = [:] {
+        didSet { persistSavedBounds() }
+    }
+
+    private static let savedBoundsKey = "savedWindowBounds"
+
+    init() {
+        savedBounds = Self.loadSavedBounds()
+    }
+
+    private func persistSavedBounds() {
+        let encoded = savedBounds.reduce(into: [String: [Int]]()) {
+            $0["\($1.key)"] = [$1.value.x1, $1.value.y1, $1.value.x2, $1.value.y2]
+        }
+        UserDefaults.standard.set(encoded, forKey: Self.savedBoundsKey)
+    }
+
+    private static func loadSavedBounds() -> [Int: Bounds] {
+        guard let raw = UserDefaults.standard.dictionary(forKey: savedBoundsKey) as? [String: [Int]] else {
+            return [:]
+        }
+        return raw.reduce(into: [Int: Bounds]()) {
+            guard let id = Int($1.key), $1.value.count == 4 else { return }
+            $0[id] = Bounds(x1: $1.value[0], y1: $1.value[1], x2: $1.value[2], y2: $1.value[3])
+        }
+    }
 
     // Tile geometry for tuck.
     private let tileW = 360
@@ -76,14 +103,30 @@ final class TerminalController: ObservableObject {
 
     // MARK: - Focus
 
-    /// Bring a session's window and tab to the front, restoring its bounds if tucked.
-    func focusSession(windowID: Int, tty: String) {
+    /// Bring a session's window and tab to the front, restoring its bounds if
+    /// tucked. Degenerate "originals" (tile-sized, e.g. saved after an app
+    /// restart mid-tuck) are replaced by a comfortable default size.
+    func focusSession(windowID: Int, tty: String, currentBounds: Bounds? = nil) {
         guard terminalRunning else { return }
-        var boundsLine = ""
-        if let b = savedBounds[windowID] {
-            boundsLine = "    set bounds of targetWin to {\(b.x1), \(b.y1), \(b.x2), \(b.y2)}"
-            savedBounds[windowID] = nil
+        var target = savedBounds[windowID]
+        savedBounds[windowID] = nil
+
+        let minUsableW = tileW + 140
+        let minUsableH = tileH + 120
+        if let t = target, (t.x2 - t.x1) < minUsableW || (t.y2 - t.y1) < minUsableH {
+            target = defaultRestoreBounds()
         }
+        // No saved original but the window is currently tile-sized: expand it.
+        if target == nil, let c = currentBounds,
+           (c.x2 - c.x1) < minUsableW, (c.y2 - c.y1) < minUsableH {
+            target = defaultRestoreBounds()
+        }
+
+        var boundsLine = ""
+        if let b = target {
+            boundsLine = "    set bounds of targetWin to {\(b.x1), \(b.y1), \(b.x2), \(b.y2)}"
+        }
+        dbg("focusSession: window \(windowID), restore=\(target.map { "\($0)" } ?? "none")")
         let devtty = tty.hasPrefix("/dev/") ? tty : "/dev/\(tty)"
         let script = """
         tell application "Terminal"
@@ -109,6 +152,11 @@ final class TerminalController: ObservableObject {
         dbg("tuckAll: called with \(windows.count) windows, terminalRunning=\(terminalRunning)")
         guard terminalRunning, !windows.isEmpty else { return }
         for w in windows where savedBounds[w.id] == nil {
+            // Never record a tile-sized frame as an "original" (e.g. a window
+            // still tucked by a previous run) — restore would go nowhere useful.
+            if (w.bounds.x2 - w.bounds.x1) <= tileW + 40, (w.bounds.y2 - w.bounds.y1) <= tileH + 40 {
+                continue
+            }
             savedBounds[w.id] = w.bounds
         }
         let tiles = computeTiles(count: windows.count)
@@ -126,13 +174,31 @@ final class TerminalController: ObservableObject {
     }
 
     /// Restore every tucked window to its saved bounds, then forget them.
-    func restoreAll() {
-        guard terminalRunning, !savedBounds.isEmpty else { return }
+    /// Tile-sized windows with no saved original (e.g. tucked before an app
+    /// restart) are expanded to the default size, slightly cascaded.
+    func restoreAll(windows: [TermWindow]) {
+        guard terminalRunning else { return }
+        var targets: [(id: Int, b: Bounds)] = []
+        var cascade = 0
+        for w in windows {
+            if let b = savedBounds[w.id] {
+                targets.append((w.id, b))
+            } else if (w.bounds.x2 - w.bounds.x1) <= tileW + 40,
+                      (w.bounds.y2 - w.bounds.y1) <= tileH + 40 {
+                var b = defaultRestoreBounds()
+                b = Bounds(x1: b.x1 + cascade, y1: b.y1 + cascade,
+                           x2: b.x2 + cascade, y2: b.y2 + cascade)
+                cascade += 28
+                targets.append((w.id, b))
+            }
+        }
+        dbg("restoreAll: \(targets.count) windows (\(savedBounds.count) saved)")
+        guard !targets.isEmpty else { return }
         var body = ""
-        for (id, b) in savedBounds {
+        for t in targets {
             body += """
               try
-                set bounds of (first window whose id is \(id)) to {\(b.x1), \(b.y1), \(b.x2), \(b.y2)}
+                set bounds of (first window whose id is \(t.id)) to {\(t.b.x1), \(t.b.y1), \(t.b.x2), \(t.b.y2)}
               end try
 
             """
@@ -144,6 +210,26 @@ final class TerminalController: ObservableObject {
     /// Drop saved bounds for windows that no longer exist.
     func pruneSaved(existingIDs: Set<Int>) {
         savedBounds = savedBounds.filter { existingIDs.contains($0.key) }
+    }
+
+    /// A comfortable centered window size (~60% of the visible screen) used
+    /// when a window has no usable original bounds to restore to.
+    private func defaultRestoreBounds() -> Bounds {
+        guard let screen = NSScreen.main else {
+            return Bounds(x1: 200, y1: 120, x2: 1300, y2: 880)
+        }
+        let fullH = Int(screen.frame.height.rounded())
+        let vf = screen.visibleFrame
+        let left = Int(vf.origin.x.rounded())
+        let width = Int(vf.size.width.rounded())
+        let top = fullH - Int((vf.origin.y + vf.size.height).rounded())
+        let height = Int(vf.size.height.rounded())
+
+        let w = min(1200, width * 6 / 10)
+        let h = min(800, height * 7 / 10)
+        let x1 = left + (width - w) / 2
+        let y1 = top + (height - h) / 2
+        return Bounds(x1: x1, y1: y1, x2: x1 + w, y2: y1 + h)
     }
 
     // MARK: - Tile layout
