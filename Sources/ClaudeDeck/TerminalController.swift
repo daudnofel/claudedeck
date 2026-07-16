@@ -27,7 +27,10 @@ final class TerminalController: ObservableObject {
     /// Returns [] (without launching Terminal) when Terminal is not running.
     func snapshot() -> [TermWindow] {
         guard terminalRunning else { return [] }
+        // `sep` must be bound OUTSIDE the tell block: inside it, `tab` resolves
+        // to Terminal's tab class (stringifying as "tab"), not the tab character.
         let script = """
+        set sep to tab
         tell application "Terminal"
           set out to ""
           repeat with w in windows
@@ -38,13 +41,15 @@ final class TerminalController: ObservableObject {
             repeat with t in tabs of w
               set ttys to ttys & (tty of t) & ","
             end repeat
-            set out to out & wid & tab & wname & tab & (item 1 of b) & "," & (item 2 of b) & "," & (item 3 of b) & "," & (item 4 of b) & tab & ttys & linefeed
+            set out to out & wid & sep & wname & sep & (item 1 of b) & "," & (item 2 of b) & "," & (item 3 of b) & "," & (item 4 of b) & sep & ttys & linefeed
           end repeat
           return out
         end tell
         """
         guard let desc = run(script) else { return [] }
-        return parseSnapshot(desc)
+        let windows = parseSnapshot(desc)
+        NSLog("ClaudeDeck snapshot: %d windows parsed", windows.count)
+        return windows
     }
 
     private func parseSnapshot(_ desc: NSAppleEventDescriptor) -> [TermWindow] {
@@ -185,6 +190,8 @@ final class TerminalController: ObservableObject {
         let result = script.executeAndReturnError(&errorDict)
         if let err = errorDict {
             let num = (err["NSAppleScriptErrorNumber"] as? Int) ?? 0
+            let msg = (err["NSAppleScriptErrorMessage"] as? String) ?? "unknown"
+            NSLog("ClaudeDeck AppleScript error %d: %@", num, msg)
             // -1743: user has not authorized Automation. -1744: needs UI consent.
             if num == -1743 || num == -1744 {
                 permissionDenied = true
