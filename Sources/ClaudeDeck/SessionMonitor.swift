@@ -21,6 +21,10 @@ final class SessionMonitor: ObservableObject {
 
     private var timer: Timer?
 
+    /// Consecutive polls each session (by tty) has shown high CPU. One resize
+    /// redraw spikes a single poll; real streaming sustains several.
+    private var cpuStreak: [String: Int] = [:]
+
     init() {
         // Add in .common mode so polling keeps running while the menu popover is open.
         let t = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
@@ -55,8 +59,15 @@ final class SessionMonitor: ObservableObject {
                         s.terminalWindowID = w.id
                         s.taskTitle = SessionMonitor.taskTitle(from: w.name)
                     }
+                    // Debounced CPU signal: only sustained load counts as working.
+                    self.cpuStreak[s.tty] = s.cpuPercent >= 10 ? (self.cpuStreak[s.tty] ?? 0) + 1 : 0
+                    if s.status == .idle, self.cpuStreak[s.tty, default: 0] >= 2 {
+                        s.status = .working
+                    }
                     return s
                 }
+                let liveTtys = Set(discovered.map { $0.tty })
+                self.cpuStreak = self.cpuStreak.filter { liveTtys.contains($0.key) }
                 // Working sessions first, then alphabetical by name.
                 merged.sort {
                     let lw = ($0.status == .working)
@@ -102,15 +113,15 @@ final class SessionMonitor: ObservableObject {
 
             guard let cwd = resolveCwd(pid: pid) else { continue }
             let name = (cwd as NSString).lastPathComponent
-            let status = statusFor(cwd: cwd, cpuPercent: cpu)
             byTty[tty] = Session(
                 pid: pid,
                 tty: tty,
                 cwd: cwd,
                 name: name.isEmpty ? cwd : name,
                 taskTitle: nil,
-                status: status,
-                terminalWindowID: nil
+                status: statusFor(cwd: cwd),
+                terminalWindowID: nil,
+                cpuPercent: cpu
             )
         }
         return Array(byTty.values)
@@ -158,11 +169,9 @@ final class SessionMonitor: ObservableObject {
         return result
     }
 
-    /// Working if the newest transcript `.jsonl` was modified within 15 s, or
-    /// the claude process is burning meaningful CPU (streaming/thinking phases
-    /// can go >15 s without a transcript write).
-    static func statusFor(cwd: String, cpuPercent: Double = 0) -> SessionStatus {
-        if cpuPercent >= 8 { return .working }
+    /// Working if the newest transcript `.jsonl` was modified within 15 s.
+    /// (Sustained CPU is layered on separately with a debounce in refresh().)
+    static func statusFor(cwd: String) -> SessionStatus {
         let encoded = encodeProjectDir(cwd)
         let home = FileManager.default.homeDirectoryForCurrentUser
         let dir = home

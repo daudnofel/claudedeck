@@ -29,6 +29,7 @@ struct Session: Identifiable, Equatable {
     var taskTitle: String?   // live task description parsed from the Terminal window name
     var status: SessionStatus
     var terminalWindowID: Int?
+    var cpuPercent: Double = 0  // claude process CPU, used with debounce as a "working" signal
 
     var id: Int32 { pid }
 }
