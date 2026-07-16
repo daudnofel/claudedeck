@@ -150,6 +150,18 @@ final class TerminalController: ObservableObject {
     /// bottom-right corner of the main screen.
     func tuckAll(windows: [TermWindow]) {
         dbg("tuckAll: called with \(windows.count) windows, terminalRunning=\(terminalRunning)")
+        applyLayout(windows: windows, frames: computeTiles(count: windows.count))
+    }
+
+    /// Collapse every window into a card-deck stack of minimum-size windows
+    /// in the bottom-right corner (Terminal clamps to its own minimum size).
+    func collapseAll(windows: [TermWindow]) {
+        dbg("collapseAll: called with \(windows.count) windows, terminalRunning=\(terminalRunning)")
+        applyLayout(windows: windows, frames: computeStack(count: windows.count))
+    }
+
+    /// Save originals (once) and move each window to its target frame.
+    private func applyLayout(windows: [TermWindow], frames: [Bounds]) {
         guard terminalRunning, !windows.isEmpty else { return }
         for w in windows where savedBounds[w.id] == nil {
             // Never record a tile-sized frame as an "original" (e.g. a window
@@ -159,10 +171,9 @@ final class TerminalController: ObservableObject {
             }
             savedBounds[w.id] = w.bounds
         }
-        let tiles = computeTiles(count: windows.count)
         var body = ""
         for (i, w) in windows.enumerated() {
-            let t = tiles[i]
+            let t = frames[i]
             body += """
               try
                 set bounds of (first window whose id is \(w.id)) to {\(t.x1), \(t.y1), \(t.x2), \(t.y2)}
@@ -233,6 +244,25 @@ final class TerminalController: ObservableObject {
     }
 
     // MARK: - Tile layout
+
+    /// Card-deck stack: minimum-size windows piled in the bottom-right corner,
+    /// each offset a little up-left so the stack reads like rectangle.stack.
+    private func computeStack(count: Int) -> [Bounds] {
+        guard count > 0 else { return [] }
+        let cardW = 220, cardH = 140, step = 14
+        var right = 1400, bottom = 850
+        if let screen = NSScreen.main {
+            let fullH = Int(screen.frame.height.rounded())
+            let vf = screen.visibleFrame
+            right = Int((vf.origin.x + vf.size.width).rounded()) - margin
+            bottom = fullH - Int(vf.origin.y.rounded()) - margin
+        }
+        return (0..<count).map { i in
+            let x2 = right - i * step
+            let y2 = bottom - i * step
+            return Bounds(x1: x2 - cardW, y1: y2 - cardH, x2: x2, y2: y2)
+        }
+    }
 
     private func computeTiles(count: Int) -> [Bounds] {
         guard count > 0 else { return [] }

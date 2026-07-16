@@ -82,6 +82,9 @@ struct SessionListView: View {
                 Button("Tuck all") {
                     terminal.tuckAll(windows: monitor.latestWindows)
                 }
+                Button("Collapse all") {
+                    terminal.collapseAll(windows: monitor.latestWindows)
+                }
                 Button("Restore all") {
                     terminal.restoreAll(windows: monitor.latestWindows)
                 }
