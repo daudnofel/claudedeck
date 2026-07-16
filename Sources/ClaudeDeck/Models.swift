@@ -1,8 +1,12 @@
 import Foundation
 
-/// Temporary debug tracing to a file (unified logging proved unreliable for
-/// LaunchServices-launched instances during development). Remove before release.
+/// Opt-in debug tracing to /tmp/claudedeck-debug.txt, enabled by launching
+/// with CLAUDEDECK_DEBUG=1 (unified logging proved unreliable for
+/// LaunchServices-launched instances, so this writes a plain file).
+let debugEnabled = ProcessInfo.processInfo.environment["CLAUDEDECK_DEBUG"] == "1"
+
 func dbg(_ message: String) {
+    guard debugEnabled else { return }
     let line = "\(Date()) \(message)\n"
     let path = "/tmp/claudedeck-debug.txt"
     if let handle = FileHandle(forWritingAtPath: path) {
