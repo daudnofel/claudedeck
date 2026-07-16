@@ -39,16 +39,21 @@ final class SessionMonitor: ObservableObject {
         timer?.invalidate()
     }
 
-    /// Kick off one poll cycle. Heavy work runs off the main thread; the Terminal
-    /// snapshot and all publishing happen back on the main thread.
+    /// Skip a poll if the previous one is still in flight (main-thread flag).
+    private var isRefreshing = false
+
+    /// Kick off one poll cycle. Discovery AND the Terminal snapshot run off
+    /// the main thread; only merging and publishing happen on the main thread.
     func refresh() {
+        if isRefreshing { return }
+        isRefreshing = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             let discovered = SessionMonitor.discoverSessions()
+            let windows = self.terminal.snapshotSync()
             DispatchQueue.main.async {
+                self.isRefreshing = false
                 dbg("refresh: discovered \(discovered.count) sessions")
-                let windows = self.terminal.snapshot()
-                self.terminal.pruneSaved(existingIDs: Set(windows.map { $0.id }))
                 self.latestWindows = windows
 
                 var merged = discovered.map { session -> Session in
@@ -87,7 +92,8 @@ final class SessionMonitor: ObservableObject {
         guard let out = runProcess("/bin/ps", ["-axo", "pid=,%cpu=,tty=,command="]) else {
             return []
         }
-        var byTty: [String: Session] = [:]
+        var candidates: [(pid: Int32, cpu: Double, tty: String)] = []
+        var seenTtys = Set<String>()
         for rawLine in out.split(separator: "\n") {
             guard let (pid, cpu, tty, command) = parsePsLine(String(rawLine)) else { continue }
 
@@ -109,22 +115,26 @@ final class SessionMonitor: ObservableObject {
             }
 
             // Rule 4: one session per tty.
-            if byTty[tty] != nil { continue }
+            guard seenTtys.insert(tty).inserted else { continue }
+            candidates.append((pid, cpu, tty))
+        }
 
-            guard let cwd = resolveCwd(pid: pid) else { continue }
+        // One batched lsof call for all pids instead of one subprocess each.
+        let cwds = resolveCwds(pids: candidates.map { $0.pid })
+        return candidates.compactMap { c in
+            guard let cwd = cwds[c.pid] else { return nil }
             let name = (cwd as NSString).lastPathComponent
-            byTty[tty] = Session(
-                pid: pid,
-                tty: tty,
+            return Session(
+                pid: c.pid,
+                tty: c.tty,
                 cwd: cwd,
                 name: name.isEmpty ? cwd : name,
                 taskTitle: nil,
                 status: statusFor(cwd: cwd),
                 terminalWindowID: nil,
-                cpuPercent: cpu
+                cpuPercent: c.cpu
             )
         }
-        return Array(byTty.values)
     }
 
     /// Parse a `pid %cpu tty command` line from `ps -axo pid=,%cpu=,tty=,command=`.
@@ -144,16 +154,25 @@ final class SessionMonitor: ObservableObject {
         return (pid, cpu, tty, String(rest))
     }
 
-    /// Resolve a process's cwd via `lsof -a -p <pid> -d cwd -Fn`.
-    static func resolveCwd(pid: Int32) -> String? {
-        guard let out = runProcess("/usr/sbin/lsof", ["-a", "-p", "\(pid)", "-d", "cwd", "-Fn"]) else {
-            return nil
+    /// Resolve cwds for many pids in ONE `lsof` call.
+    /// `-Fpn` output interleaves `p<pid>` and `n<path>` lines.
+    static func resolveCwds(pids: [Int32]) -> [Int32: String] {
+        guard !pids.isEmpty else { return [:] }
+        let list = pids.map(String.init).joined(separator: ",")
+        guard let out = runProcess("/usr/sbin/lsof", ["-a", "-p", list, "-d", "cwd", "-Fpn"]) else {
+            return [:]
         }
-        for line in out.split(separator: "\n") where line.first == "n" {
-            let path = String(line.dropFirst())
-            return path.isEmpty ? nil : path
+        var result: [Int32: String] = [:]
+        var currentPid: Int32?
+        for line in out.split(separator: "\n") {
+            if line.first == "p" {
+                currentPid = Int32(line.dropFirst())
+            } else if line.first == "n", let pid = currentPid {
+                let path = String(line.dropFirst())
+                if !path.isEmpty { result[pid] = path }
+            }
         }
-        return nil
+        return result
     }
 
     /// Encode a cwd into its `~/.claude/projects/<encoded>` directory name:

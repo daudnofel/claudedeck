@@ -2,20 +2,30 @@ import Foundation
 import AppKit
 import Combine
 
-/// AppleScript bridge to Terminal.app. All methods run on the main thread
-/// (NSAppleScript is not thread-safe). Failures are caught and never crash;
-/// an Automation-permission denial (-1743) flips `permissionDenied`.
+/// AppleScript bridge to Terminal.app.
+///
+/// All scripts execute via `osascript` on a private serial queue so the UI
+/// thread never blocks; geometry is computed on the caller's (main) thread
+/// since it touches NSScreen. `savedBounds` is confined to the script queue.
 final class TerminalController: ObservableObject {
     @Published var permissionDenied: Bool = false
 
+    private let scriptQueue = DispatchQueue(label: "com.claudedeck.applescript", qos: .userInitiated)
+
     /// Original bounds of tucked windows, keyed by Terminal window id.
     /// Persisted to UserDefaults so an app restart never forgets where
-    /// tucked windows came from.
+    /// tucked windows came from. Confined to `scriptQueue` after init.
     private var savedBounds: [Int: Bounds] = [:] {
         didSet { persistSavedBounds() }
     }
 
     private static let savedBoundsKey = "savedWindowBounds"
+
+    // Tile geometry for tuck.
+    private let tileW = 360
+    private let tileH = 230
+    private let gap = 12
+    private let margin = 16
 
     init() {
         savedBounds = Self.loadSavedBounds()
@@ -38,12 +48,6 @@ final class TerminalController: ObservableObject {
         }
     }
 
-    // Tile geometry for tuck.
-    private let tileW = 360
-    private let tileH = 230
-    private let gap = 12
-    private let margin = 16
-
     private var terminalRunning: Bool {
         !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Terminal").isEmpty
     }
@@ -51,9 +55,10 @@ final class TerminalController: ObservableObject {
     // MARK: - Snapshot
 
     /// List Terminal windows with id, name, bounds and per-tab ttys.
+    /// Blocking; call from a background thread (SessionMonitor's poll path).
     /// Returns [] (without launching Terminal) when Terminal is not running.
-    func snapshot() -> [TermWindow] {
-        guard terminalRunning else { dbg("snapshot: Terminal not running"); return [] }
+    func snapshotSync() -> [TermWindow] {
+        guard terminalRunning else { return [] }
         // `sep` must be bound OUTSIDE the tell block: inside it, `tab` resolves
         // to Terminal's tab class (stringifying as "tab"), not the tab character.
         let script = """
@@ -73,14 +78,17 @@ final class TerminalController: ObservableObject {
           return out
         end tell
         """
-        guard let desc = run(script) else { dbg("snapshot: script returned nil"); return [] }
-        let windows = parseSnapshot(desc)
-        dbg("snapshot: \(windows.count) windows parsed")
-        return windows
+        return scriptQueue.sync {
+            guard let text = runScript(script) else { dbg("snapshot: script failed"); return [] }
+            let windows = Self.parseSnapshot(text)
+            // Prune saved bounds for windows that no longer exist.
+            let ids = Set(windows.map { $0.id })
+            savedBounds = savedBounds.filter { ids.contains($0.key) }
+            return windows
+        }
     }
 
-    private func parseSnapshot(_ desc: NSAppleEventDescriptor) -> [TermWindow] {
-        guard let text = desc.stringValue else { return [] }
+    static func parseSnapshot(_ text: String) -> [TermWindow] {
         var windows: [TermWindow] = []
         for rawLine in text.split(separator: "\n") {
             let fields = String(rawLine).components(separatedBy: "\t")
@@ -106,122 +114,131 @@ final class TerminalController: ObservableObject {
     /// Bring a session's window and tab to the front, restoring its bounds if
     /// tucked. Degenerate "originals" (tile-sized, e.g. saved after an app
     /// restart mid-tuck) are replaced by a comfortable default size.
+    /// Non-blocking; safe to call from the UI.
     func focusSession(windowID: Int, tty: String, currentBounds: Bounds? = nil) {
         guard terminalRunning else { return }
-        var target = savedBounds[windowID]
-        savedBounds[windowID] = nil
-
+        let fallback = defaultRestoreBounds()   // NSScreen: main thread
         let minUsableW = tileW + 140
         let minUsableH = tileH + 120
-        if let t = target, (t.x2 - t.x1) < minUsableW || (t.y2 - t.y1) < minUsableH {
-            target = defaultRestoreBounds()
-        }
-        // No saved original but the window is currently tile-sized: expand it.
-        if target == nil, let c = currentBounds,
-           (c.x2 - c.x1) < minUsableW, (c.y2 - c.y1) < minUsableH {
-            target = defaultRestoreBounds()
-        }
-
-        var boundsLine = ""
-        if let b = target {
-            boundsLine = "    set bounds of targetWin to {\(b.x1), \(b.y1), \(b.x2), \(b.y2)}"
-        }
-        dbg("focusSession: window \(windowID), restore=\(target.map { "\($0)" } ?? "none")")
         let devtty = tty.hasPrefix("/dev/") ? tty : "/dev/\(tty)"
-        let script = """
-        tell application "Terminal"
-          try
-            set targetWin to (first window whose id is \(windowID))
-        \(boundsLine)
-            set frontmost of targetWin to true
-            try
-              set selected tab of targetWin to (first tab of targetWin whose tty is "\(devtty)")
-            end try
-          end try
-          activate
-        end tell
-        """
-        run(script)
+
+        scriptQueue.async { [weak self] in
+            guard let self else { return }
+            var target = self.savedBounds[windowID]
+            self.savedBounds[windowID] = nil
+            if let t = target, (t.x2 - t.x1) < minUsableW || (t.y2 - t.y1) < minUsableH {
+                target = fallback
+            }
+            // No saved original but the window is currently tile-sized: expand it.
+            if target == nil, let c = currentBounds,
+               (c.x2 - c.x1) < minUsableW, (c.y2 - c.y1) < minUsableH {
+                target = fallback
+            }
+            var boundsLine = ""
+            if let b = target {
+                boundsLine = "    set bounds of targetWin to {\(b.x1), \(b.y1), \(b.x2), \(b.y2)}"
+            }
+            dbg("focusSession: window \(windowID), restore=\(target.map { "\($0)" } ?? "none")")
+            let script = """
+            tell application "Terminal"
+              try
+                set targetWin to window id \(windowID)
+            \(boundsLine)
+                set frontmost of targetWin to true
+                try
+                  set selected tab of targetWin to (first tab of targetWin whose tty is "\(devtty)")
+                end try
+              end try
+              activate
+            end tell
+            """
+            self.runScript(script)
+        }
     }
 
-    // MARK: - Tuck / Restore
+    // MARK: - Tuck / Collapse / Restore
 
-    /// Save each window's current bounds (once) and tile them into the
-    /// bottom-right corner of the main screen.
+    /// Shrink every window into a bottom-right grid of small tiles.
     func tuckAll(windows: [TermWindow]) {
-        dbg("tuckAll: called with \(windows.count) windows, terminalRunning=\(terminalRunning)")
+        dbg("tuckAll: called with \(windows.count) windows")
         applyLayout(windows: windows, frames: computeTiles(count: windows.count))
     }
 
     /// Collapse every window into a card-deck stack of minimum-size windows
     /// in the bottom-right corner (Terminal clamps to its own minimum size).
     func collapseAll(windows: [TermWindow]) {
-        dbg("collapseAll: called with \(windows.count) windows, terminalRunning=\(terminalRunning)")
+        dbg("collapseAll: called with \(windows.count) windows")
         applyLayout(windows: windows, frames: computeStack(count: windows.count))
     }
 
     /// Save originals (once) and move each window to its target frame.
+    /// Non-blocking; safe to call from the UI.
     private func applyLayout(windows: [TermWindow], frames: [Bounds]) {
         guard terminalRunning, !windows.isEmpty else { return }
-        for w in windows where savedBounds[w.id] == nil {
-            // Never record a tile-sized frame as an "original" (e.g. a window
-            // still tucked by a previous run) — restore would go nowhere useful.
-            if (w.bounds.x2 - w.bounds.x1) <= tileW + 40, (w.bounds.y2 - w.bounds.y1) <= tileH + 40 {
-                continue
+        scriptQueue.async { [weak self] in
+            guard let self else { return }
+            for w in windows where self.savedBounds[w.id] == nil {
+                // Never record a tile-sized frame as an "original" (e.g. a window
+                // still tucked by a previous run) — restore would go nowhere useful.
+                if (w.bounds.x2 - w.bounds.x1) <= self.tileW + 40,
+                   (w.bounds.y2 - w.bounds.y1) <= self.tileH + 40 {
+                    continue
+                }
+                self.savedBounds[w.id] = w.bounds
             }
-            savedBounds[w.id] = w.bounds
-        }
-        var body = ""
-        for (i, w) in windows.enumerated() {
-            let t = frames[i]
-            body += """
-              try
-                set bounds of (first window whose id is \(w.id)) to {\(t.x1), \(t.y1), \(t.x2), \(t.y2)}
-              end try
+            var body = ""
+            for (i, w) in windows.enumerated() {
+                let t = frames[i]
+                body += """
+                  try
+                    set bounds of window id \(w.id) to {\(t.x1), \(t.y1), \(t.x2), \(t.y2)}
+                  end try
 
-            """
+                """
+            }
+            self.runScript("tell application \"Terminal\"\n\(body)end tell")
         }
-        run("tell application \"Terminal\"\n\(body)end tell")
     }
 
     /// Restore every tucked window to its saved bounds, then forget them.
     /// Tile-sized windows with no saved original (e.g. tucked before an app
     /// restart) are expanded to the default size, slightly cascaded.
+    /// Non-blocking; safe to call from the UI.
     func restoreAll(windows: [TermWindow]) {
         guard terminalRunning else { return }
-        var targets: [(id: Int, b: Bounds)] = []
-        var cascade = 0
-        for w in windows {
-            if let b = savedBounds[w.id] {
-                targets.append((w.id, b))
-            } else if (w.bounds.x2 - w.bounds.x1) <= tileW + 40,
-                      (w.bounds.y2 - w.bounds.y1) <= tileH + 40 {
-                var b = defaultRestoreBounds()
-                b = Bounds(x1: b.x1 + cascade, y1: b.y1 + cascade,
-                           x2: b.x2 + cascade, y2: b.y2 + cascade)
-                cascade += 28
-                targets.append((w.id, b))
+        let fallback = defaultRestoreBounds()   // NSScreen: main thread
+        scriptQueue.async { [weak self] in
+            guard let self else { return }
+            var targets: [(id: Int, b: Bounds)] = []
+            var cascade = 0
+            for w in windows {
+                if let b = self.savedBounds[w.id] {
+                    targets.append((w.id, b))
+                } else if (w.bounds.x2 - w.bounds.x1) <= self.tileW + 40,
+                          (w.bounds.y2 - w.bounds.y1) <= self.tileH + 40 {
+                    let b = Bounds(x1: fallback.x1 + cascade, y1: fallback.y1 + cascade,
+                                   x2: fallback.x2 + cascade, y2: fallback.y2 + cascade)
+                    cascade += 28
+                    targets.append((w.id, b))
+                }
             }
-        }
-        dbg("restoreAll: \(targets.count) windows (\(savedBounds.count) saved)")
-        guard !targets.isEmpty else { return }
-        var body = ""
-        for t in targets {
-            body += """
-              try
-                set bounds of (first window whose id is \(t.id)) to {\(t.b.x1), \(t.b.y1), \(t.b.x2), \(t.b.y2)}
-              end try
+            dbg("restoreAll: \(targets.count) windows (\(self.savedBounds.count) saved)")
+            guard !targets.isEmpty else { return }
+            var body = ""
+            for t in targets {
+                body += """
+                  try
+                    set bounds of window id \(t.id) to {\(t.b.x1), \(t.b.y1), \(t.b.x2), \(t.b.y2)}
+                  end try
 
-            """
+                """
+            }
+            self.runScript("tell application \"Terminal\"\n\(body)end tell")
+            self.savedBounds.removeAll()
         }
-        run("tell application \"Terminal\"\n\(body)end tell")
-        savedBounds.removeAll()
     }
 
-    /// Drop saved bounds for windows that no longer exist.
-    func pruneSaved(existingIDs: Set<Int>) {
-        savedBounds = savedBounds.filter { existingIDs.contains($0.key) }
-    }
+    // MARK: - Geometry (main thread: touches NSScreen)
 
     /// A comfortable centered window size (~60% of the visible screen) used
     /// when a window has no usable original bounds to restore to.
@@ -242,8 +259,6 @@ final class TerminalController: ObservableObject {
         let y1 = top + (height - h) / 2
         return Bounds(x1: x1, y1: y1, x2: x1 + w, y2: y1 + h)
     }
-
-    // MARK: - Tile layout
 
     /// Card-deck stack: minimum-size windows piled in the bottom-right corner,
     /// each offset a little up-left so the stack reads like rectangle.stack.
@@ -298,24 +313,40 @@ final class TerminalController: ObservableObject {
         return tiles
     }
 
-    // MARK: - AppleScript execution
+    // MARK: - Script execution (scriptQueue only)
 
+    /// Run a script via osascript, returning stdout on success or nil on error.
+    /// Must be called on `scriptQueue`.
     @discardableResult
-    private func run(_ source: String) -> NSAppleEventDescriptor? {
-        guard let script = NSAppleScript(source: source) else { return nil }
-        var errorDict: NSDictionary?
-        let result = script.executeAndReturnError(&errorDict)
-        if let err = errorDict {
-            let num = (err["NSAppleScriptErrorNumber"] as? Int) ?? 0
-            let msg = (err["NSAppleScriptErrorMessage"] as? String) ?? "unknown"
-            dbg("AppleScript error \(num): \(msg)")
-            // -1743: user has not authorized Automation. -1744: needs UI consent.
-            if num == -1743 || num == -1744 {
-                permissionDenied = true
-            }
+    private func runScript(_ source: String) -> String? {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", source]
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+        do {
+            try proc.run()
+        } catch {
+            dbg("osascript launch failed: \(error)")
             return nil
         }
-        if permissionDenied { permissionDenied = false }
-        return result
+        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+
+        if proc.terminationStatus != 0 {
+            let err = String(data: errData, encoding: .utf8) ?? ""
+            dbg("AppleScript error: \(err.trimmingCharacters(in: .whitespacesAndNewlines))")
+            // -1743: user has not authorized Automation. -1744: needs UI consent.
+            let denied = err.contains("-1743") || err.contains("-1744")
+            DispatchQueue.main.async { self.permissionDenied = denied }
+            return nil
+        }
+        DispatchQueue.main.async {
+            if self.permissionDenied { self.permissionDenied = false }
+        }
+        return String(data: outData, encoding: .utf8)
     }
 }
