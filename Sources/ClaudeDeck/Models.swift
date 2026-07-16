@@ -47,6 +47,7 @@ struct PausedSession: Identifiable, Equatable {
     let sessionId: String      // session UUID, passed to `claude --resume`
     let name: String           // display name = last path component of cwd
     var subtitle: String?      // latest ai-title from the transcript, if any
+    var contextTokens: Int?    // approx. context size from the last usage record
     let lastActivity: Date     // transcript mtime, used for sorting and freshness
 
     var id: String { cwd }     // one entry per project directory / cwd

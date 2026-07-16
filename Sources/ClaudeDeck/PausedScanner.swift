@@ -29,6 +29,7 @@ final class PausedScanner {
         let cwd: String?
         let sessionId: String?
         let subtitle: String?
+        let contextTokens: Int?
     }
 
     /// Deep-read cache keyed by transcript path; reused while mtime is unchanged.
@@ -73,6 +74,7 @@ final class PausedScanner {
                 sessionId: sid,
                 name: name.isEmpty ? cwd : name,
                 subtitle: p.subtitle,
+                contextTokens: p.contextTokens,
                 lastActivity: mtime
             ))
         }
@@ -113,7 +115,7 @@ final class PausedScanner {
     /// optional subtitle (latest `ai-title`). Never reads the whole file.
     private func deepRead(path: String, mtime: Date) -> Parsed {
         guard let handle = FileHandle(forReadingAtPath: path) else {
-            return Parsed(mtime: mtime, cwd: nil, sessionId: nil, subtitle: nil)
+            return Parsed(mtime: mtime, cwd: nil, sessionId: nil, subtitle: nil, contextTokens: nil)
         }
         defer { try? handle.close() }
 
@@ -148,7 +150,26 @@ final class PausedScanner {
         var subtitle = latestTitle(in: tailLines)
         if subtitle == nil { subtitle = latestTitle(in: headLines) }
 
-        return Parsed(mtime: mtime, cwd: cwd, sessionId: sid, subtitle: subtitle)
+        // Context size: the newest assistant usage record in the tail. What a
+        // resume must reload is roughly the last turn's full input context.
+        let tokens = latestContextTokens(in: tailLines)
+
+        return Parsed(mtime: mtime, cwd: cwd, sessionId: sid, subtitle: subtitle, contextTokens: tokens)
+    }
+
+    /// Approximate current context size: input + cache-read + cache-creation
+    /// (+ output) tokens of the most recent `message.usage` record.
+    private func latestContextTokens(in lines: [[String: Any]]) -> Int? {
+        for o in lines.reversed() {
+            guard let message = o["message"] as? [String: Any],
+                  let usage = message["usage"] as? [String: Any] else { continue }
+            let total = ["input_tokens", "cache_read_input_tokens",
+                         "cache_creation_input_tokens", "output_tokens"]
+                .compactMap { usage[$0] as? Int }
+                .reduce(0, +)
+            if total > 0 { return total }
+        }
+        return nil
     }
 
     private func latestTitle(in lines: [[String: Any]]) -> String? {

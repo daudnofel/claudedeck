@@ -220,9 +220,18 @@ private struct PausedRow: View {
                     .foregroundStyle(.secondary)
                     .frame(width: 9)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(paused.name)
-                        .font(.system(size: 13, weight: .semibold))
-                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Text(paused.name)
+                            .font(.system(size: 13, weight: .semibold))
+                            .lineLimit(1)
+                        if let tokens = paused.contextTokens {
+                            // Amber above ~150k tokens: resuming as-is is expensive
+                            // and Claude Code will suggest resuming from a summary.
+                            Text(formatTokens(tokens))
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(tokens > 150_000 ? Color.orange : Color.secondary)
+                        }
+                    }
                     Text(subtitleLine)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
@@ -249,6 +258,13 @@ private struct PausedRow: View {
         if let s = paused.subtitle, !s.isEmpty { return "\(age) · \(s)" }
         return age
     }
+}
+
+/// Compact token count like "45k tok", "1.2M tok".
+private func formatTokens(_ n: Int) -> String {
+    if n >= 1_000_000 { return String(format: "%.1fM tok", Double(n) / 1_000_000) }
+    if n >= 1_000 { return "\(n / 1_000)k tok" }
+    return "\(n) tok"
 }
 
 /// Compact relative age like "just now", "5m ago", "2h ago", "3d ago".
