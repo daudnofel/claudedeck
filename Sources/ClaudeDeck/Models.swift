@@ -14,10 +14,11 @@ func dbg(_ message: String) {
     }
 }
 
-/// Two-state status derived from the session's transcript activity.
+/// Two-state status, derived primarily from the live spinner glyph in the
+/// Terminal title (falling back to transcript freshness). See SessionMonitor.
 enum SessionStatus: Equatable {
-    case working   // transcript touched within the last few seconds -> green, pulsing
-    case idle      // otherwise -> gray
+    case working   // Claude Code is actively working -> green, pulsing
+    case idle      // idle / awaiting input -> gray
 }
 
 /// A single running Claude Code session.
@@ -29,7 +30,7 @@ struct Session: Identifiable, Equatable {
     var taskTitle: String?   // live task description parsed from the Terminal window name
     var status: SessionStatus
     var terminalWindowID: Int?
-    var cpuPercent: Double = 0  // claude process CPU, used with debounce as a "working" signal
+    var cpuPercent: Double = 0  // claude process CPU (informational; status now derives from the title glyph)
 
     var id: Int32 { pid }
 }

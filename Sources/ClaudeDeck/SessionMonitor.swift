@@ -6,9 +6,18 @@ import Combine
 /// Every 2 seconds it:
 ///   1. enumerates `claude` CLI processes via `ps` (off the main thread),
 ///   2. resolves each session's cwd via `lsof`,
-///   3. stats the newest transcript `.jsonl` to decide working vs. idle,
-///   4. (on the main thread) snapshots Terminal windows to attach a window id
+///   3. (on the main thread) snapshots Terminal windows to attach a window id
 ///      and live task title, then publishes the merged `[Session]`.
+///
+/// Status (working vs. idle) is decided by a two-tier signal hierarchy, best
+/// signal first:
+///   1. the live status glyph in the matched window's title — Claude Code
+///      animates a braille spinner while working and shows ✳ while idle
+///      (`statusFromTitle`). Authoritative, instant and free.
+///   2. fallback, only when no glyph is available (window unmatched, renamed,
+///      or task not set yet): transcript `.jsonl` freshness (`statusFor`).
+///      Weak — Claude Code writes the transcript in bursts and can go minutes
+///      without a write mid-task — so it is strictly a last resort.
 final class SessionMonitor: ObservableObject {
     @Published private(set) var sessions: [Session] = []
     @Published var showDockWindow: Bool = false
@@ -20,10 +29,6 @@ final class SessionMonitor: ObservableObject {
     private(set) var latestWindows: [TermWindow] = []
 
     private var timer: Timer?
-
-    /// Consecutive polls each session (by tty) has shown high CPU. One resize
-    /// redraw spikes a single poll; real streaming sustains several.
-    private var cpuStreak: [String: Int] = [:]
 
     init() {
         // Add in .common mode so polling keeps running while the menu popover is open.
@@ -63,16 +68,17 @@ final class SessionMonitor: ObservableObject {
                     }) {
                         s.terminalWindowID = w.id
                         s.taskTitle = SessionMonitor.taskTitle(from: w.name)
-                    }
-                    // Debounced CPU signal: only sustained load counts as working.
-                    self.cpuStreak[s.tty] = s.cpuPercent >= 10 ? (self.cpuStreak[s.tty] ?? 0) + 1 : 0
-                    if s.status == .idle, self.cpuStreak[s.tty, default: 0] >= 2 {
-                        s.status = .working
+                        // Primary, authoritative signal: the live status glyph in
+                        // the window title (braille spinner = working, ✳ = idle).
+                        // Instant and free — we already have the title. It overrides
+                        // the mtime fallback already set in s.status. Only when the
+                        // glyph is absent or unrecognized do we keep that fallback.
+                        if let glyphStatus = SessionMonitor.statusFromTitle(w.name) {
+                            s.status = glyphStatus
+                        }
                     }
                     return s
                 }
-                let liveTtys = Set(discovered.map { $0.tty })
-                self.cpuStreak = self.cpuStreak.filter { liveTtys.contains($0.key) }
                 // Working sessions first, then alphabetical by name.
                 merged.sort {
                     let lw = ($0.status == .working)
@@ -188,8 +194,14 @@ final class SessionMonitor: ObservableObject {
         return result
     }
 
-    /// Working if the newest transcript `.jsonl` was modified within 15 s.
-    /// (Sustained CPU is layered on separately with a debounce in refresh().)
+    /// FALLBACK status, used only when the matched window title carries no
+    /// recognizable status glyph (window unmatched, renamed, or task not set
+    /// yet). Working if the newest transcript `.jsonl` was modified within 30 s.
+    ///
+    /// This is a deliberately weak signal: Claude Code writes the transcript in
+    /// bursts, so a genuinely working session can go far longer than 30 s between
+    /// writes (and a just-finished, idle session can look fresh for a moment).
+    /// The title glyph (`statusFromTitle`) is always preferred when available.
     static func statusFor(cwd: String) -> SessionStatus {
         let encoded = encodeProjectDir(cwd)
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -214,7 +226,38 @@ final class SessionMonitor: ObservableObject {
             }
         }
         guard let mtime = latest else { return .idle }
-        return Date().timeIntervalSince(mtime) <= 15 ? .working : .idle
+        return Date().timeIntervalSince(mtime) <= 30 ? .working : .idle
+    }
+
+    /// PRIMARY status signal: parse the live status glyph Claude Code animates
+    /// into the Terminal window title, immediately before the task text —
+    /// "cwd — <glyph> task — 120×30".
+    ///
+    /// Calibrated from an empirical trace of 7 live sessions: an actively
+    /// working session shows a braille spinner (U+2800–U+28FF, e.g. ⠂ ⠐) while
+    /// an idle session awaiting input shows ✳ (U+2733). The split was clean —
+    /// 121 braille samples on the two working sessions, 324 ✳ samples on the
+    /// five idle ones, no overlap. Other documented spinner frames (·✢✶✻✽) are
+    /// treated as working too for robustness across Claude Code versions.
+    ///
+    /// Returns nil when the leading glyph is missing or unrecognized (plain
+    /// shell, renamed window, no task yet) so the caller can fall back to mtime.
+    ///
+    /// Caveat: Terminal's window `name` reflects only the SELECTED tab, so in a
+    /// multi-tab window the glyph belongs to whichever tab is frontmost. This
+    /// user's windows are single-tab, so it is always the right session.
+    static func statusFromTitle(_ windowName: String) -> SessionStatus? {
+        let segments = windowName.components(separatedBy: "\u{2014}") // em dash
+        guard segments.count >= 2,
+              let glyph = segments[1].unicodeScalars.first(where: {
+                  !CharacterSet.whitespacesAndNewlines.contains($0)
+              }) else { return nil }
+        switch glyph.value {
+        case 0x2800...0x28FF:                        return .working // braille spinner
+        case 0x00B7, 0x2722, 0x2736, 0x273B, 0x273D: return .working // other spinner frames
+        case 0x2733:                                 return .idle    // ✳ awaiting input
+        default:                                     return nil      // unknown → fall back
+        }
     }
 
     /// Pull the live task description out of a Terminal window name such as
