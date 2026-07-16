@@ -104,6 +104,11 @@ final class TerminalController: ObservableObject {
                 .split(separator: ",")
                 .map { $0.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
+            // Skip tab-less husks: closing a window via AppleScript can leave an
+            // invisible, zero-tab window object behind (see closeWindow). Those
+            // carry no tty, so they never match a session and must not consume a
+            // tuck grid slot.
+            guard !ttys.isEmpty else { continue }
             windows.append(TermWindow(id: id, name: name, bounds: bounds, ttys: ttys))
         }
         return windows
@@ -154,6 +159,62 @@ final class TerminalController: ObservableObject {
             """
             self.runScript(script)
         }
+    }
+
+    // MARK: - Pause / Resume
+
+    /// Close a Terminal window by id after its session's `claude` process has
+    /// exited (the tab is a bare shell, so Terminal closes it without a prompt).
+    /// `saving no` suppresses the save prompt. Non-blocking; forgets any tuck
+    /// bounds for the window.
+    ///
+    /// Note: Terminal frequently keeps an invisible, zero-tab window object
+    /// behind after such a close. It is harmless — not shown on screen and
+    /// carrying no tty — and `parseSnapshot` filters it out.
+    func closeWindow(id: Int) {
+        guard terminalRunning else { return }
+        scriptQueue.async { [weak self] in
+            guard let self else { return }
+            dbg("closeWindow: \(id)")
+            self.savedBounds[id] = nil
+            self.runScript("""
+            tell application "Terminal"
+              try
+                close (every window whose id is \(id)) saving no
+              end try
+            end tell
+            """)
+        }
+    }
+
+    /// Open a NEW Terminal window running `claude --resume <sessionId>` in `cwd`,
+    /// then bring Terminal to the front. The cwd is shell-quoted (paths contain
+    /// spaces and quotes). Non-blocking. `do script` launches Terminal if it is
+    /// not already running.
+    func resumeSession(cwd: String, sessionId: String) {
+        let command = "cd \(Self.shellSingleQuote(cwd)) && claude --resume \(sessionId)"
+        scriptQueue.async { [weak self] in
+            guard let self else { return }
+            dbg("resumeSession: \(command)")
+            self.runScript("""
+            tell application "Terminal"
+              do script \(Self.appleScriptLiteral(command))
+              activate
+            end tell
+            """)
+        }
+    }
+
+    /// Wrap a string in single quotes for the shell, escaping embedded quotes.
+    static func shellSingleQuote(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Encode a string as an AppleScript string literal (escaping `\` and `"`).
+    static func appleScriptLiteral(_ s: String) -> String {
+        var e = s.replacingOccurrences(of: "\\", with: "\\\\")
+        e = e.replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"" + e + "\""
     }
 
     // MARK: - Tuck / Collapse / Restore

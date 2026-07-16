@@ -33,6 +33,12 @@ struct SessionListView: View {
         if terminal.permissionDenied {
             permissionHint
         }
+        activeSection
+        pausedSection
+    }
+
+    @ViewBuilder
+    private var activeSection: some View {
         if monitor.sessions.isEmpty {
             Text("No Claude Code sessions running.")
                 .font(.callout)
@@ -41,17 +47,46 @@ struct SessionListView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 12)
         } else {
+            sectionHeader("Active")
             VStack(spacing: 0) {
                 ForEach(monitor.sessions) { session in
-                    SessionRow(session: session) {
-                        if let wid = session.terminalWindowID {
-                            let current = monitor.latestWindows.first { $0.id == wid }?.bounds
-                            terminal.focusSession(windowID: wid, tty: session.tty, currentBounds: current)
-                        }
-                    }
+                    SessionRow(
+                        session: session,
+                        onTap: { focus(session) },
+                        onPause: { monitor.pauseSession(session) }
+                    )
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private var pausedSection: some View {
+        if !monitor.pausedSessions.isEmpty {
+            sectionHeader("Paused")
+            VStack(spacing: 0) {
+                ForEach(monitor.pausedSessions) { paused in
+                    PausedRow(paused: paused) { monitor.resume(paused) }
+                }
+            }
+        }
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title.uppercased())
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+            .padding(.bottom, 2)
+    }
+
+    /// Focus a session's window and tab, restoring its bounds if tucked.
+    private func focus(_ session: Session) {
+        guard let wid = session.terminalWindowID else { return }
+        let current = monitor.latestWindows.first { $0.id == wid }?.bounds
+        terminal.focusSession(windowID: wid, tty: session.tty, currentBounds: current)
     }
 
     private var permissionHint: some View {
@@ -124,6 +159,7 @@ struct SessionListView: View {
 private struct SessionRow: View {
     let session: Session
     let onTap: () -> Void
+    let onPause: () -> Void
     @State private var hovering = false
 
     var body: some View {
@@ -151,7 +187,77 @@ private struct SessionRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        // Pause affordance, revealed on hover. Rendered as an overlay sibling
+        // (not nested in the row Button) so its clicks don't also focus.
+        .overlay(alignment: .trailing) {
+            if hovering {
+                Button(action: onPause) {
+                    Image(systemName: "pause.circle")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Pause session (close window, resume anytime)")
+                .padding(.trailing, 12)
+            }
+        }
     }
+}
+
+// MARK: - Paused row
+
+private struct PausedRow: View {
+    let paused: PausedSession
+    let onResume: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: onResume) {
+            HStack(spacing: 8) {
+                Image(systemName: "pause.circle")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 9)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(paused.name)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                    Text(subtitleLine)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "play.circle")
+                    .font(.system(size: 14))
+                    .foregroundStyle(hovering ? Color.accentColor : Color.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+            .background(hovering ? Color.primary.opacity(0.08) : Color.clear)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("Resume session in a new window")
+    }
+
+    private var subtitleLine: String {
+        let age = relativeAge(from: paused.lastActivity)
+        if let s = paused.subtitle, !s.isEmpty { return "\(age) · \(s)" }
+        return age
+    }
+}
+
+/// Compact relative age like "just now", "5m ago", "2h ago", "3d ago".
+private func relativeAge(from date: Date) -> String {
+    let s = max(0, Date().timeIntervalSince(date))
+    if s < 60 { return "just now" }
+    if s < 3600 { return "\(Int(s / 60))m ago" }
+    if s < 86400 { return "\(Int(s / 3600))h ago" }
+    return "\(Int(s / 86400))d ago"
 }
 
 // MARK: - Status dots

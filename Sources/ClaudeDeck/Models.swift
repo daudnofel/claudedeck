@@ -39,6 +39,19 @@ struct Session: Identifiable, Equatable {
     var id: Int32 { pid }
 }
 
+/// A resumable ("paused") Claude Code session, discovered from an on-disk
+/// transcript whose working directory has no live session. Resuming reopens it
+/// in a new Terminal window with its full history via `claude --resume`.
+struct PausedSession: Identifiable, Equatable {
+    let cwd: String            // true working directory, recovered from the transcript
+    let sessionId: String      // session UUID, passed to `claude --resume`
+    let name: String           // display name = last path component of cwd
+    var subtitle: String?      // latest ai-title from the transcript, if any
+    let lastActivity: Date     // transcript mtime, used for sorting and freshness
+
+    var id: String { cwd }     // one entry per project directory / cwd
+}
+
 /// Terminal.app window bounds in Terminal's coordinate space: {left, top, right, bottom},
 /// top-left origin, y increasing downward.
 struct Bounds: Equatable {

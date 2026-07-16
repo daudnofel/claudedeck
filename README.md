@@ -11,10 +11,14 @@ versus done and waiting for review. ClaudeDeck fixes that.
 ```
 ┌─────────────────────────────┐
 │ Claude Sessions             │
-│ 🟢 ai-sidebar               │  green dot pulses while Claude works
-│    Build macOS dock widget  │  live task subtitle from the window title
-│ ⚪ api-refactor             │  row click → focus that window + tab
-│ ⚪ blog-fixes               │
+│ ACTIVE                      │
+│ 🟢 ai-sidebar          ⏸    │  green dot pulses while Claude works
+│    Build macOS dock widget  │  hover a row → ⏸ pause it
+│ ⚪ api-refactor         ⏸    │  row click → focus that window + tab
+│ ⚪ blog-fixes           ⏸    │
+│ PAUSED                      │
+│ ⏸ old-project     2h ago ▶  │  click → resume with full history
+│    Fix the CSV exporter     │
 ├─────────────────────────────┤
 │ [Tuck all] [Collapse all]   │
 │ [Restore all]               │
@@ -31,6 +35,38 @@ versus done and waiting for review. ClaudeDeck fixes that.
 - **Click a session** — its window returns to its pre-tuck bounds (or a
   comfortable centered size if none is known), comes to the front, and the
   right tab is selected.
+- **Pause a session** — hover any Active row and click ⏸ to close its window
+  and clear it off your desktop; **resume** it anytime from the Paused list.
+
+## Pause & resume
+
+Sometimes you want a session out of the way without losing where you were.
+ClaudeDeck's panel has two sections:
+
+- **Active** — every open session (working or idle), exactly as before.
+- **Paused** — resumable sessions whose window is closed.
+
+**Pause** (hover an Active row, click the ⏸ button) ends the session's `claude`
+process cleanly with `SIGTERM` — never `SIGKILL` — waits for it to exit, then
+closes its Terminal window. Your **context is never lost**: Claude Code's
+transcript already lives on disk at `~/.claude/projects/…`, so pausing only
+clears the window off your desktop. The session drops from Active and reappears
+under Paused.
+
+**Resume** (click a Paused row, or its ▶ button) opens a **new** Terminal window
+and runs `claude --resume <session>` in the original working directory, bringing
+the whole conversation back with full history.
+
+The Paused list is discovered from `~/.claude/projects/`: one entry per project
+directory (its most recent transcript), showing the project name, how long ago
+it was last active, and the session's title. It lists only directories with **no
+live session**, caps at the 8 most recent, skips anything older than 14 days,
+and skips directories that no longer exist. The section is hidden when empty.
+
+> **Caveat:** pausing interrupts any work in flight — if Claude is mid-task, that
+> turn stops. The conversation is preserved, so a resumed session picks up right
+> where the transcript left off, but you may need to re-prompt the interrupted
+> step.
 
 ## How it works
 
@@ -56,6 +92,12 @@ polling every 2 seconds off the main thread:
   window title, focuses windows, and tucks/restores window bounds. Original
   window positions persist across app restarts. No Accessibility permission is
   needed — only Automation.
+- **Paused sessions.** The same 2-second poll scans `~/.claude/projects/` for
+  resumable transcripts. It stays cheap: directories are only re-stat'd each
+  cycle, and a transcript is deep-read (just its head and tail via `FileHandle`,
+  never the whole multi-MB file) only when its modification time changed. The
+  encoded project-directory name is lossy, so the true working directory is
+  recovered from the `cwd` field inside the transcript.
 
 ## Build & run
 

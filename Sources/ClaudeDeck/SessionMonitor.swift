@@ -20,10 +20,15 @@ import Combine
 ///      without a write mid-task — so it is strictly a last resort.
 final class SessionMonitor: ObservableObject {
     @Published private(set) var sessions: [Session] = []
+    @Published private(set) var pausedSessions: [PausedSession] = []
     @Published var showDockWindow: Bool = false
 
     /// Owned AppleScript bridge. Exposed so views can observe its permission state.
     let terminal = TerminalController()
+
+    /// Scans `~/.claude/projects` for resumable sessions. Confined to the poll's
+    /// background block (serialized by `isRefreshing`).
+    private let pausedScanner = PausedScanner()
 
     /// Latest Terminal window snapshot, used to resolve session windows for tuck.
     private(set) var latestWindows: [TermWindow] = []
@@ -56,10 +61,14 @@ final class SessionMonitor: ObservableObject {
             guard let self else { return }
             let discovered = SessionMonitor.discoverSessions()
             let windows = self.terminal.snapshotSync()
+            // Paused = resumable transcripts whose cwd has no live session.
+            let activeCwds = Set(discovered.map { $0.cwd })
+            let paused = self.pausedScanner.scan(activeCwds: activeCwds)
             DispatchQueue.main.async {
                 self.isRefreshing = false
-                dbg("refresh: discovered \(discovered.count) sessions")
+                dbg("refresh: discovered \(discovered.count) sessions, \(paused.count) paused")
                 self.latestWindows = windows
+                self.pausedSessions = paused
 
                 var merged = discovered.map { session -> Session in
                     var s = session
@@ -87,9 +96,63 @@ final class SessionMonitor: ObservableObject {
                     return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
                 }
                 dbg("refresh: \(merged.count) sessions, \(merged.filter { $0.terminalWindowID != nil }.count) matched to windows")
+                for p in paused { dbg("  paused: \(p.name) [\(p.sessionId)] \(p.cwd)") }
                 self.sessions = merged
             }
         }
+    }
+
+    // MARK: - Pause / Resume
+
+    /// Pause a live session: end its `claude` process cleanly (SIGTERM, never
+    /// SIGKILL — the transcript is already on disk), wait for it to exit, then
+    /// close its Terminal window. The session moves from Active to Paused;
+    /// resume reopens it with full history. Any work in flight is interrupted,
+    /// not lost — the conversation is preserved.
+    func pauseSession(_ session: Session) {
+        let pid = session.pid
+        let windowID = session.terminalWindowID
+        dbg("pause: \(session.name) pid=\(pid) window=\(windowID.map(String.init) ?? "-")")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let gone = SessionMonitor.terminateAndWait(pid: pid, timeout: 3.0)
+            dbg("pause: pid \(pid) exited=\(gone)")
+            // Only close once the process is gone: closing a window with a live
+            // claude would raise Terminal's "processes are running" prompt. A
+            // brief settle lets the shell return to a bare prompt (and claude's
+            // caffeinate child reap) so the close is silent.
+            if gone, let wid = windowID {
+                usleep(500_000)
+                self.terminal.closeWindow(id: wid)
+            }
+            DispatchQueue.main.async { self.refresh() }
+        }
+    }
+
+    /// Resume a paused session in a NEW Terminal window, full history intact.
+    func resume(_ paused: PausedSession) {
+        dbg("resume: \(paused.name) session=\(paused.sessionId)")
+        terminal.resumeSession(cwd: paused.cwd, sessionId: paused.sessionId)
+        // Give the new window a moment to appear, then re-poll so it lands in
+        // Active (and drops out of Paused).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.refresh()
+        }
+    }
+
+    /// SIGTERM a pid and poll (up to `timeout`) until it is gone. Returns true
+    /// once the process has exited. Never sends SIGKILL — Claude Code flushes
+    /// and exits cleanly on SIGTERM, and the transcript is already on disk.
+    static func terminateAndWait(pid: Int32, timeout: TimeInterval) -> Bool {
+        if kill(pid, SIGTERM) != 0 {
+            return errno == ESRCH   // already gone counts as success
+        }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if kill(pid, 0) != 0 && errno == ESRCH { return true }
+            usleep(100_000)   // 100 ms
+        }
+        return kill(pid, 0) != 0 && errno == ESRCH
     }
 
     // MARK: - Discovery (pure, off-main-thread safe)
