@@ -26,7 +26,7 @@ final class TerminalController: ObservableObject {
     /// List Terminal windows with id, name, bounds and per-tab ttys.
     /// Returns [] (without launching Terminal) when Terminal is not running.
     func snapshot() -> [TermWindow] {
-        guard terminalRunning else { return [] }
+        guard terminalRunning else { dbg("snapshot: Terminal not running"); return [] }
         // `sep` must be bound OUTSIDE the tell block: inside it, `tab` resolves
         // to Terminal's tab class (stringifying as "tab"), not the tab character.
         let script = """
@@ -46,9 +46,9 @@ final class TerminalController: ObservableObject {
           return out
         end tell
         """
-        guard let desc = run(script) else { return [] }
+        guard let desc = run(script) else { dbg("snapshot: script returned nil"); return [] }
         let windows = parseSnapshot(desc)
-        NSLog("ClaudeDeck snapshot: %d windows parsed", windows.count)
+        dbg("snapshot: \(windows.count) windows parsed")
         return windows
     }
 
@@ -106,6 +106,7 @@ final class TerminalController: ObservableObject {
     /// Save each window's current bounds (once) and tile them into the
     /// bottom-right corner of the main screen.
     func tuckAll(windows: [TermWindow]) {
+        dbg("tuckAll: called with \(windows.count) windows, terminalRunning=\(terminalRunning)")
         guard terminalRunning, !windows.isEmpty else { return }
         for w in windows where savedBounds[w.id] == nil {
             savedBounds[w.id] = w.bounds
@@ -191,7 +192,7 @@ final class TerminalController: ObservableObject {
         if let err = errorDict {
             let num = (err["NSAppleScriptErrorNumber"] as? Int) ?? 0
             let msg = (err["NSAppleScriptErrorMessage"] as? String) ?? "unknown"
-            NSLog("ClaudeDeck AppleScript error %d: %@", num, msg)
+            dbg("AppleScript error \(num): \(msg)")
             // -1743: user has not authorized Automation. -1744: needs UI consent.
             if num == -1743 || num == -1744 {
                 permissionDenied = true

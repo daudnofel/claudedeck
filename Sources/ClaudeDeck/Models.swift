@@ -1,5 +1,19 @@
 import Foundation
 
+/// Temporary debug tracing to a file (unified logging proved unreliable for
+/// LaunchServices-launched instances during development). Remove before release.
+func dbg(_ message: String) {
+    let line = "\(Date()) \(message)\n"
+    let path = "/tmp/claudedeck-debug.txt"
+    if let handle = FileHandle(forWritingAtPath: path) {
+        handle.seekToEndOfFile()
+        handle.write(line.data(using: .utf8)!)
+        handle.closeFile()
+    } else {
+        try? line.write(toFile: path, atomically: true, encoding: .utf8)
+    }
+}
+
 /// Two-state status derived from the session's transcript activity.
 enum SessionStatus: Equatable {
     case working   // transcript touched within the last few seconds -> green, pulsing

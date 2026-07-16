@@ -48,6 +48,7 @@ final class SessionMonitor: ObservableObject {
             guard let self else { return }
             let discovered = SessionMonitor.discoverSessions()
             DispatchQueue.main.async {
+                dbg("refresh: discovered \(discovered.count) sessions")
                 let windows = self.terminal.snapshot()
                 self.terminal.pruneSaved(existingIDs: Set(windows.map { $0.id }))
                 self.latestWindows = windows
@@ -69,6 +70,7 @@ final class SessionMonitor: ObservableObject {
                     if lw != rw { return lw }
                     return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
                 }
+                dbg("refresh: \(merged.count) sessions, \(merged.filter { $0.terminalWindowID != nil }.count) matched to windows")
                 self.sessions = merged
             }
         }
@@ -138,7 +140,7 @@ final class SessionMonitor: ObservableObject {
 
     /// Resolve a process's cwd via `lsof -a -p <pid> -d cwd -Fn`.
     static func resolveCwd(pid: Int32) -> String? {
-        guard let out = runProcess("/usr/bin/lsof", ["-a", "-p", "\(pid)", "-d", "cwd", "-Fn"]) else {
+        guard let out = runProcess("/usr/sbin/lsof", ["-a", "-p", "\(pid)", "-d", "cwd", "-Fn"]) else {
             return nil
         }
         for line in out.split(separator: "\n") where line.first == "n" {
