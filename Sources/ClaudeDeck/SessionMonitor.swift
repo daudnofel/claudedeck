@@ -73,12 +73,12 @@ final class SessionMonitor: ObservableObject {
     // MARK: - Discovery (pure, off-main-thread safe)
 
     static func discoverSessions() -> [Session] {
-        guard let out = runProcess("/bin/ps", ["-axo", "pid=,tty=,command="]) else {
+        guard let out = runProcess("/bin/ps", ["-axo", "pid=,%cpu=,tty=,command="]) else {
             return []
         }
         var byTty: [String: Session] = [:]
         for rawLine in out.split(separator: "\n") {
-            guard let (pid, tty, command) = parsePsLine(String(rawLine)) else { continue }
+            guard let (pid, cpu, tty, command) = parsePsLine(String(rawLine)) else { continue }
 
             // Rule 1: a real interactive session has a controlling tty.
             if tty == "??" { continue }
@@ -102,7 +102,7 @@ final class SessionMonitor: ObservableObject {
 
             guard let cwd = resolveCwd(pid: pid) else { continue }
             let name = (cwd as NSString).lastPathComponent
-            let status = statusFor(cwd: cwd)
+            let status = statusFor(cwd: cwd, cpuPercent: cpu)
             byTty[tty] = Session(
                 pid: pid,
                 tty: tty,
@@ -116,20 +116,21 @@ final class SessionMonitor: ObservableObject {
         return Array(byTty.values)
     }
 
-    /// Parse a `pid tty command` line from `ps -axo pid=,tty=,command=`.
-    static func parsePsLine(_ raw: String) -> (Int32, String, String)? {
-        let line = raw.trimmingCharacters(in: .whitespaces)
-        guard let firstSpace = line.firstIndex(of: " ") else { return nil }
-        let pidStr = String(line[..<firstSpace])
-        guard let pid = Int32(pidStr) else { return nil }
+    /// Parse a `pid %cpu tty command` line from `ps -axo pid=,%cpu=,tty=,command=`.
+    static func parsePsLine(_ raw: String) -> (Int32, Double, String, String)? {
+        var rest = Substring(raw.trimmingCharacters(in: .whitespaces))
 
-        let afterPid = line[line.index(after: firstSpace)...].drop { $0 == " " }
-        guard let secondSpace = afterPid.firstIndex(of: " ") else { return nil }
-        let tty = String(afterPid[..<secondSpace])
+        func nextField() -> String? {
+            guard let space = rest.firstIndex(of: " ") else { return nil }
+            let field = String(rest[..<space])
+            rest = rest[rest.index(after: space)...].drop { $0 == " " }
+            return field
+        }
 
-        let command = String(afterPid[afterPid.index(after: secondSpace)...].drop { $0 == " " })
-        guard !command.isEmpty else { return nil }
-        return (pid, tty, command)
+        guard let pidStr = nextField(), let pid = Int32(pidStr),
+              let cpuStr = nextField(), let cpu = Double(cpuStr),
+              let tty = nextField(), !rest.isEmpty else { return nil }
+        return (pid, cpu, tty, String(rest))
     }
 
     /// Resolve a process's cwd via `lsof -a -p <pid> -d cwd -Fn`.
@@ -157,8 +158,11 @@ final class SessionMonitor: ObservableObject {
         return result
     }
 
-    /// Working if the newest `.jsonl` in the project dir was modified within 5 s.
-    static func statusFor(cwd: String) -> SessionStatus {
+    /// Working if the newest transcript `.jsonl` was modified within 15 s, or
+    /// the claude process is burning meaningful CPU (streaming/thinking phases
+    /// can go >15 s without a transcript write).
+    static func statusFor(cwd: String, cpuPercent: Double = 0) -> SessionStatus {
+        if cpuPercent >= 8 { return .working }
         let encoded = encodeProjectDir(cwd)
         let home = FileManager.default.homeDirectoryForCurrentUser
         let dir = home
@@ -182,7 +186,7 @@ final class SessionMonitor: ObservableObject {
             }
         }
         guard let mtime = latest else { return .idle }
-        return Date().timeIntervalSince(mtime) <= 5 ? .working : .idle
+        return Date().timeIntervalSince(mtime) <= 15 ? .working : .idle
     }
 
     /// Pull the live task description out of a Terminal window name such as

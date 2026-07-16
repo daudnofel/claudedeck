@@ -172,14 +172,16 @@ private struct StatusDot: View {
 }
 
 private struct PulsingDot: View {
-    @State private var pulse = false
-
     var body: some View {
-        Circle()
-            .fill(Color.green)
-            .frame(width: 9, height: 9)
-            .opacity(pulse ? 0.35 : 1.0)
-            .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: pulse)
-            .onAppear { pulse = true }
+        // Clock-driven pulse: unlike a repeatForever animation, this cannot
+        // freeze when the menu panel is closed and reopened.
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let phase = (sin(t * 2 * .pi / 1.6) + 1) / 2
+            Circle()
+                .fill(Color.green)
+                .frame(width: 9, height: 9)
+                .opacity(0.35 + 0.65 * phase)
+        }
     }
 }
