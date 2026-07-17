@@ -35,6 +35,7 @@ struct Session: Identifiable, Equatable {
     var status: SessionStatus
     var terminalWindowID: Int?
     var cpuPercent: Double = 0  // claude process CPU (informational; status now derives from the title glyph)
+    var hasRunningShell = false // a Bash-tool shell child is alive (fg or bg task)
 
     var id: Int32 { pid }
 }

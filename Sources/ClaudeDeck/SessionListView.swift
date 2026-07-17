@@ -162,6 +162,15 @@ private struct SessionRow: View {
     let onPause: () -> Void
     @State private var hovering = false
 
+    /// Task title, plus a hint when a Bash-tool shell is alive (matches the
+    /// "1 shell" indicator Claude Code shows in its own footer).
+    private var subtitle: String {
+        var parts: [String] = []
+        if let task = session.taskTitle, !task.isEmpty { parts.append(task) }
+        if session.hasRunningShell { parts.append("shell running") }
+        return parts.joined(separator: " · ")
+    }
+
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 8) {
@@ -170,8 +179,8 @@ private struct SessionRow: View {
                     Text(session.name)
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
-                    if let task = session.taskTitle, !task.isEmpty {
-                        Text(task)
+                    if !subtitle.isEmpty {
+                        Text(subtitle)
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)

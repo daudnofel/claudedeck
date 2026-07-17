@@ -86,6 +86,13 @@ final class SessionMonitor: ObservableObject {
                             s.status = glyphStatus
                         }
                     }
+                    // The glyph goes idle the moment the prompt frees up, but a
+                    // background task Claude launched may still be running — and
+                    // the session will pick itself back up when it finishes.
+                    // A live Bash-tool shell child means work is still happening.
+                    if s.status == .idle, s.hasRunningShell {
+                        s.status = .working
+                    }
                     return s
                 }
                 // Working sessions first, then alphabetical by name.
@@ -158,13 +165,19 @@ final class SessionMonitor: ObservableObject {
     // MARK: - Discovery (pure, off-main-thread safe)
 
     static func discoverSessions() -> [Session] {
-        guard let out = runProcess("/bin/ps", ["-axo", "pid=,%cpu=,tty=,command="]) else {
+        guard let out = runProcess("/bin/ps", ["-axo", "pid=,ppid=,%cpu=,tty=,command="]) else {
             return []
         }
         var candidates: [(pid: Int32, cpu: Double, tty: String)] = []
         var seenTtys = Set<String>()
+        // Parents of live Bash-tool shells: Claude Code runs every tool shell
+        // (foreground or background task) as `/bin/zsh -c source
+        // ~/.claude/shell-snapshots/snapshot-…`, a fingerprint no MCP server or
+        // helper shares. Used to catch "idle prompt but background task alive".
+        var shellParents = Set<Int32>()
         for rawLine in out.split(separator: "\n") {
-            guard let (pid, cpu, tty, command) = parsePsLine(String(rawLine)) else { continue }
+            guard let (pid, ppid, cpu, tty, command) = parsePsLine(String(rawLine)) else { continue }
+            if command.contains("/.claude/shell-snapshots/") { shellParents.insert(ppid) }
 
             // Rule 1: a real interactive session has a controlling tty.
             if tty == "??" { continue }
@@ -193,7 +206,7 @@ final class SessionMonitor: ObservableObject {
         return candidates.compactMap { c in
             guard let cwd = cwds[c.pid] else { return nil }
             let name = (cwd as NSString).lastPathComponent
-            return Session(
+            var session = Session(
                 pid: c.pid,
                 tty: c.tty,
                 cwd: cwd,
@@ -203,11 +216,14 @@ final class SessionMonitor: ObservableObject {
                 terminalWindowID: nil,
                 cpuPercent: c.cpu
             )
+            session.hasRunningShell = shellParents.contains(c.pid)
+            return session
         }
     }
 
-    /// Parse a `pid %cpu tty command` line from `ps -axo pid=,%cpu=,tty=,command=`.
-    static func parsePsLine(_ raw: String) -> (Int32, Double, String, String)? {
+    /// Parse a `pid ppid %cpu tty command` line from
+    /// `ps -axo pid=,ppid=,%cpu=,tty=,command=`.
+    static func parsePsLine(_ raw: String) -> (Int32, Int32, Double, String, String)? {
         var rest = Substring(raw.trimmingCharacters(in: .whitespaces))
 
         func nextField() -> String? {
@@ -218,9 +234,10 @@ final class SessionMonitor: ObservableObject {
         }
 
         guard let pidStr = nextField(), let pid = Int32(pidStr),
+              let ppidStr = nextField(), let ppid = Int32(ppidStr),
               let cpuStr = nextField(), let cpu = Double(cpuStr),
               let tty = nextField(), !rest.isEmpty else { return nil }
-        return (pid, cpu, tty, String(rest))
+        return (pid, ppid, cpu, tty, String(rest))
     }
 
     /// Resolve cwds for many pids in ONE `lsof` call.
