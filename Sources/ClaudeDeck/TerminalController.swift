@@ -195,6 +195,19 @@ final class TerminalController: ObservableObject {
         let command = "cd \(Self.shellSingleQuote(cwd)) && claude --resume \(sessionId)"
         scriptQueue.async { [weak self] in
             guard let self else { return }
+            // Cold start: `do script` is about to LAUNCH Terminal, and if
+            // Terminal previously crashed, macOS state restoration would
+            // reopen every old window alongside ours — after an
+            // out-of-memory crash that's the worst possible moment for it.
+            // Clearing the saved state first makes a cold resume open
+            // exactly the one window asked for. (Never touched while
+            // Terminal is running — quit/relaunch behaves as the user set.)
+            if !self.terminalRunning {
+                let saved = FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent("Library/Saved Application State/com.apple.Terminal.savedState")
+                try? FileManager.default.removeItem(at: saved)
+                dbg("resumeSession: cold start, cleared Terminal saved state")
+            }
             dbg("resumeSession: \(command)")
             self.runScript("""
             tell application "Terminal"
