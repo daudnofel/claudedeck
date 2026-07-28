@@ -192,7 +192,11 @@ final class TerminalController: ObservableObject {
     /// spaces and quotes). Non-blocking. `do script` launches Terminal if it is
     /// not already running.
     func resumeSession(cwd: String, sessionId: String) {
-        let command = "cd \(Self.shellSingleQuote(cwd)) && claude --resume \(sessionId)"
+        // `unset` guards against a Terminal instance whose environment carries
+        // Claude Code's child-session marker (e.g. cold-started through a
+        // claude-descended process): a resumed session is genuinely top-level,
+        // and inheriting the marker would silently disable transcript saving.
+        let command = "unset CLAUDE_CODE_CHILD_SESSION; cd \(Self.shellSingleQuote(cwd)) && claude --resume \(sessionId)"
         scriptQueue.async { [weak self] in
             guard let self else { return }
             // Cold start: `do script` is about to LAUNCH Terminal, and if

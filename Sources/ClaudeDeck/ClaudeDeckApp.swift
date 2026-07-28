@@ -5,6 +5,16 @@ import AppKit
 struct ClaudeDeckApp: App {
     @StateObject private var monitor = SessionMonitor()
 
+    init() {
+        // Scrub Claude Code's child-session markers from our own environment.
+        // `open` (and dev workflows generally) can launch this app from inside
+        // a Claude Code tool shell; if we then cold-start Terminal, Terminal
+        // inherits our environment, every shell it spawns carries the marker,
+        // and resumed sessions silently stop saving their transcripts.
+        unsetenv("CLAUDE_CODE_CHILD_SESSION")
+        unsetenv("CLAUDECODE")
+    }
+
     private var workingCount: Int {
         monitor.sessions.reduce(0) { $0 + ($1.status == .working ? 1 : 0) }
     }

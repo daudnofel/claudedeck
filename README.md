@@ -139,6 +139,13 @@ The commit history tells the full story; highlights:
   silently drops everything when the disk fills up — ask us how we know).
   `CLAUDEDECK_DEBUG=1` writes a plain trace file to
   `/tmp/claudedeck-debug.txt` instead.
+- **Environment inheritance can silently disable transcript saving.** Launch
+  this app from inside a Claude Code tool shell (`open build/ClaudeDeck.app`
+  during development) and it inherits `CLAUDE_CODE_CHILD_SESSION`; if it then
+  cold-starts Terminal, Terminal inherits it too, and every session resumed
+  from that Terminal thinks it's a nested child session and stops saving its
+  transcript. The app scrubs the marker from its own environment at startup
+  and `unset`s it in the resume command — belt and suspenders.
 
 ## Build & run
 
