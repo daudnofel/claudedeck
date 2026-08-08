@@ -21,7 +21,33 @@ import Combine
 final class SessionMonitor: ObservableObject {
     @Published private(set) var sessions: [Session] = []
     @Published private(set) var pausedSessions: [PausedSession] = []
+    @Published private(set) var archivedSessions: [PausedSession] = []
     @Published var showDockWindow: Bool = false
+
+    /// Session ids the user archived out of the Paused list. Persisted; a NEW
+    /// session in the same project gets a new id, so it reappears naturally.
+    private var archivedIds: Set<String> =
+        Set(UserDefaults.standard.stringArray(forKey: "archivedSessionIds") ?? []) {
+        didSet {
+            UserDefaults.standard.set(Array(archivedIds), forKey: "archivedSessionIds")
+        }
+    }
+
+    /// Hide a paused session under Archived (reversible, main thread).
+    func archive(_ paused: PausedSession) {
+        archivedIds.insert(paused.sessionId)
+        pausedSessions.removeAll { $0.sessionId == paused.sessionId }
+        archivedSessions.append(paused)
+        archivedSessions.sort { $0.lastActivity > $1.lastActivity }
+    }
+
+    /// Bring an archived session back into the Paused list (main thread).
+    func unarchive(_ paused: PausedSession) {
+        archivedIds.remove(paused.sessionId)
+        archivedSessions.removeAll { $0.sessionId == paused.sessionId }
+        pausedSessions.append(paused)
+        pausedSessions.sort { $0.lastActivity > $1.lastActivity }
+    }
 
     /// Owned AppleScript bridge. Exposed so views can observe its permission state.
     let terminal = TerminalController()
@@ -68,7 +94,8 @@ final class SessionMonitor: ObservableObject {
                 self.isRefreshing = false
                 dbg("refresh: discovered \(discovered.count) sessions, \(paused.count) paused")
                 self.latestWindows = windows
-                self.pausedSessions = paused
+                self.pausedSessions = paused.filter { !self.archivedIds.contains($0.sessionId) }
+                self.archivedSessions = paused.filter { self.archivedIds.contains($0.sessionId) }
 
                 var merged = discovered.map { session -> Session in
                     var s = session

@@ -107,6 +107,18 @@ transcript file, full conversation history. The row's token badge tells you
 before clicking whether you're reopening a light session or an 800k-token
 monster (Claude Code will offer a cheaper summary-resume for those).
 
+The list shows **every** resumable project — nothing is silently hidden.
+Sessions quiet for more than 30 days move under an **Older** subheader, and
+the panel scrolls when the list gets long. Don't want to see one at all?
+Hover it and click the **archive** box; it moves to a collapsed **Archived**
+section at the bottom, one click away from coming back. Archiving is by
+session id, so new work in the same project always reappears on its own.
+
+> **Tip:** Claude Code deletes transcripts after 30 days by default, which
+> silently makes old sessions unresumable. If you rely on long-lived
+> pause/resume, raise the retention in `~/.claude/settings.json`:
+> `"cleanupPeriodDays": 90`.
+
 If Terminal itself isn't running when you resume — say it crashed under
 memory pressure — ClaudeDeck clears Terminal's saved window state before
 launching it, so macOS doesn't "helpfully" restore every dead window

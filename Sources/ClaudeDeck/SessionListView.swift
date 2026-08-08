@@ -28,13 +28,33 @@ struct SessionListView: View {
 
     // MARK: - Content
 
+    @State private var showArchived = false
+
     @ViewBuilder
     private var content: some View {
         if terminal.permissionDenied {
             permissionHint
         }
-        activeSection
-        pausedSection
+        // Scroll only when the list is actually long, so the panel stays
+        // compact in the common case.
+        if visibleRowCount > 10 {
+            ScrollView { sections }.frame(maxHeight: 520)
+        } else {
+            sections
+        }
+    }
+
+    private var visibleRowCount: Int {
+        monitor.sessions.count + monitor.pausedSessions.count
+            + (showArchived ? monitor.archivedSessions.count : 0)
+    }
+
+    private var sections: some View {
+        VStack(spacing: 0) {
+            activeSection
+            pausedSection
+            archivedSection
+        }
     }
 
     @ViewBuilder
@@ -60,13 +80,68 @@ struct SessionListView: View {
         }
     }
 
+    /// Paused sessions split at 30 days — recent ones under "Paused", the
+    /// long-quiet ones under "Older" (all still one click from resuming).
+    private var pausedSplit: (recent: [PausedSession], older: [PausedSession]) {
+        let cutoff = Date().addingTimeInterval(-30 * 24 * 60 * 60)
+        let all = monitor.pausedSessions
+        return (all.filter { $0.lastActivity > cutoff },
+                all.filter { $0.lastActivity <= cutoff })
+    }
+
     @ViewBuilder
     private var pausedSection: some View {
-        if !monitor.pausedSessions.isEmpty {
+        let split = pausedSplit
+        if !split.recent.isEmpty {
             sectionHeader("Paused")
             VStack(spacing: 0) {
-                ForEach(monitor.pausedSessions) { paused in
-                    PausedRow(paused: paused) { monitor.resume(paused) }
+                ForEach(split.recent) { paused in
+                    PausedRow(paused: paused,
+                              onResume: { monitor.resume(paused) },
+                              onArchiveToggle: { monitor.archive(paused) })
+                }
+            }
+        }
+        if !split.older.isEmpty {
+            sectionHeader("Older")
+            VStack(spacing: 0) {
+                ForEach(split.older) { paused in
+                    PausedRow(paused: paused,
+                              onResume: { monitor.resume(paused) },
+                              onArchiveToggle: { monitor.archive(paused) })
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var archivedSection: some View {
+        if !monitor.archivedSessions.isEmpty {
+            Button {
+                showArchived.toggle()
+            } label: {
+                HStack(spacing: 4) {
+                    Text("ARCHIVED (\(monitor.archivedSessions.count))")
+                        .font(.system(size: 11, weight: .semibold))
+                    Image(systemName: showArchived ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 2)
+            }
+            .buttonStyle(.plain)
+            if showArchived {
+                VStack(spacing: 0) {
+                    ForEach(monitor.archivedSessions) { paused in
+                        PausedRow(paused: paused,
+                                  isArchived: true,
+                                  onResume: { monitor.resume(paused) },
+                                  onArchiveToggle: { monitor.unarchive(paused) })
+                    }
                 }
             }
         }
@@ -218,7 +293,9 @@ private struct SessionRow: View {
 
 private struct PausedRow: View {
     let paused: PausedSession
+    var isArchived = false
     let onResume: () -> Void
+    let onArchiveToggle: () -> Void
     @State private var hovering = false
 
     var body: some View {
@@ -260,6 +337,21 @@ private struct PausedRow: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .help("Resume session in a new window")
+        // Archive/unarchive affordance, revealed on hover. An overlay sibling
+        // (not nested in the row Button) so its clicks don't also resume.
+        .overlay(alignment: .trailing) {
+            if hovering {
+                Button(action: onArchiveToggle) {
+                    Image(systemName: isArchived ? "tray.and.arrow.up" : "archivebox")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(isArchived ? "Bring back from archive" : "Archive (hide from list)")
+                .padding(.trailing, 36)
+            }
+        }
     }
 
     private var subtitleLine: String {

@@ -14,9 +14,6 @@ import Foundation
 /// the cwd (every non-alphanumeric char becomes `-`), so the true cwd cannot be
 /// recovered from it — it is read from the `cwd` field inside the transcript.
 final class PausedScanner {
-    /// Cap and freshness window for the Paused list.
-    private let maxEntries = 8
-    private let maxAge: TimeInterval = 14 * 24 * 60 * 60   // 14 days
 
     /// Bytes read from each end of a transcript. The head carries the first
     /// message line (true cwd + sessionId); the tail carries the latest
@@ -50,7 +47,6 @@ final class PausedScanner {
             options: [.skipsHiddenFiles]
         ) else { return [] }
 
-        let now = Date()
         var seenPaths = Set<String>()
         var result: [PausedSession] = []
 
@@ -58,9 +54,6 @@ final class PausedScanner {
             guard (try? dir.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true,
                   let newest = newestTranscript(in: dir) else { continue }
             let path = newest.path, mtime = newest.mtime
-
-            // Cheap freshness gate before any read.
-            guard now.timeIntervalSince(mtime) <= maxAge else { continue }
             seenPaths.insert(path)
 
             let p = parsed(path: path, mtime: mtime)
@@ -83,7 +76,6 @@ final class PausedScanner {
         cache = cache.filter { seenPaths.contains($0.key) }
 
         result.sort { $0.lastActivity > $1.lastActivity }
-        if result.count > maxEntries { result.removeLast(result.count - maxEntries) }
         return result
     }
 
